@@ -141,3 +141,29 @@ def test_long_render_storage_budget_and_daily_limit(media,monkeypatch):
     day='render-budget:'+time.strftime('%Y-%m-%d',time.gmtime())
     r.set(day,main.DAILY_SECONDS)
     assert client.post('/api/jobs',headers=headers,json=request).status_code==429
+
+def test_chunked_upload_retry_and_finish(media):
+    client=TestClient(app);token='e'*64;headers={'Authorization':'Bearer '+token}
+    # Trailing padding creates several chunks while retaining a real readable MP4.
+    data=media[0].read_bytes()+b'\0'*(2*1024*1024)
+    response=client.post('/api/upload-sessions',headers=headers,json={'filename':'nature.mp4','size':len(data),'kind':'video'})
+    assert response.status_code==200
+    session=response.json();id=session['id'];chunk_size=session['chunk_size']
+    assert client.get('/api/upload-sessions/'+id,headers={'Authorization':'Bearer '+'f'*64}).status_code==404
+    assert client.put('/api/upload-sessions/'+id+'/0',headers=headers,content=data[:100]).status_code==400
+    offset=0
+    while offset<len(data):
+        chunk=data[offset:offset+chunk_size]
+        route=f'/api/upload-sessions/{id}/{offset}'
+        response=client.put(route,headers=headers,content=chunk)
+        assert response.status_code==200,response.text
+        # Lost acknowledgements can retry the exact chunk without duplicating bytes.
+        repeated=client.put(route,headers=headers,content=chunk)
+        assert repeated.json()['offset']==response.json()['offset']
+        offset=response.json()['offset']
+    response=client.post('/api/upload-sessions/'+id+'/finish',headers=headers)
+    assert response.status_code==200,response.text
+    asset=response.json()
+    assert client.post('/api/upload-sessions/'+id+'/finish',headers=headers).json()['id']==asset['id']
+    assert Path(get('asset',asset['id'])['path']).read_bytes()==data
+    assert client.get('/api/upload-sessions/'+id,headers=headers).json()['offset']==len(data)

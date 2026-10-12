@@ -36,7 +36,7 @@ The Vite proxy forwards `/api` to the backend. Production serves the compiled fr
 
 ## Rendering and music
 
-1. Uploaded files are streamed to UUID directories with per-file size limits, parsed by FFprobe, and restricted to approved media demuxers and local protocols. Assets and jobs require a private random bearer token kept in browser local storage; source paths are never returned.
+1. Browser uploads use 1 MiB chunks with automatic connection retries, byte progress, and a saved upload position. Selecting the same file after an interruption resumes that session. The server accepts repeated chunks idempotently and validates the completed media before creating an asset. Uploaded files are streamed to UUID directories with per-file size limits, parsed by FFprobe, and restricted to approved media demuxers and local protocols. Assets and jobs require a private random bearer token kept in browser local storage; source paths are never returned.
 2. FFmpeg builds one video cycle by dissolving its tail into its head and adjoining the middle. The cycle repeats with matching joins and gentle nature grading.
 3. Selected tracks are loudness-normalized, crossfaded into a playlist, then given a tail/head audio crossfade for repeated playback.
 4. `showwaves` renders a scrolling waveform and `showfreqs` renders a frequency spectrum from the very same normalized music stream mapped into the output. Optional original nature audio is mixed separately; both visualizers react to music, not the ambient sound. Channel text is read from a text file with expansion disabled; optional logos are overlaid.

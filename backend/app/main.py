@@ -2,6 +2,7 @@ import asyncio, json, os, re, secrets, shutil, threading, time, logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
+from fastapi import Request as HttpRequest
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -121,6 +122,70 @@ async def upload(file: UploadFile=File(...), kind: str=Form(...), title: str=For
         shutil.rmtree(directory,ignore_errors=True); raise HTTPException(400,'Could not read this media file')
     finally:
         await file.close(); lock.release()
+
+CHUNK_SIZE = 1024 * 1024
+class UploadSessionRequest(BaseModel):
+    filename: str = Field(max_length=250)
+    size: int = Field(gt=0)
+    kind: str
+    title: str = ''
+    artist: str = ''
+    license: str = ''
+    source: str = ''
+    permission: bool = False
+
+@app.post('/api/upload-sessions')
+def start_upload(req: UploadSessionRequest, token: str=Depends(owner)):
+    if req.kind not in ('video','music','logo'): raise HTTPException(400,'Unknown asset type')
+    if req.size>MAX_UPLOAD: raise HTTPException(413,'File exceeds upload limit (250 MB)')
+    id=secrets.token_hex(16);directory=DATA/id;directory.mkdir()
+    (directory/'partial').touch()
+    put('upload',id,{**req.model_dump(),'owner':token,'id':id})
+    return {'id':id,'offset':0,'chunk_size':CHUNK_SIZE}
+
+@app.get('/api/upload-sessions/{id}')
+def upload_status(id: str, token: str=Depends(owner)):
+    session=owned('upload',id,token)
+    return {'id':id,'offset':session['size'] if session.get('asset') else (DATA/id/'partial').stat().st_size,'chunk_size':CHUNK_SIZE,'asset':session.get('asset')}
+
+@app.put('/api/upload-sessions/{id}/{offset}')
+async def upload_chunk(id: str, offset: int, request: HttpRequest, token: str=Depends(owner)):
+    session=owned('upload',id,token)
+    if offset<0 or offset%CHUNK_SIZE!=0 or offset>=session['size']: raise HTTPException(400,'Invalid chunk offset')
+    chunk=bytearray()
+    async for part in request.stream():
+        chunk.extend(part)
+        if len(chunk)>CHUNK_SIZE: raise HTTPException(413,'Chunk is too large')
+    if len(chunk)!=min(CHUNK_SIZE,session['size']-offset): raise HTTPException(400,'Incomplete upload chunk; retry it')
+    with r.lock('chunk:'+id,timeout=30,blocking_timeout=5):
+        path=DATA/id/'partial';current=path.stat().st_size
+        if offset<current:
+            with path.open('rb') as file:
+                file.seek(offset)
+                if file.read(len(chunk))!=chunk: raise HTTPException(409,'Chunk differs from the stored upload')
+            return {'offset':current}
+        if offset!=current: raise HTTPException(409,'Upload offset changed; resume from its current position')
+        active=[json.loads(r.get(k) or '{}') for k in r.scan_iter('job:*')]
+        reserved=sum(j.get('storage_reservation',0) for j in active if j.get('status') in ('queued','rendering'))
+        used=sum(p.stat().st_size for p in DATA.rglob('*') if p.is_file())
+        if used+reserved+len(chunk)>MAX_STORAGE or shutil.disk_usage(DATA).free<reserved+len(chunk): raise HTTPException(507,'Studio storage is full; try later')
+        with path.open('ab') as file: file.write(chunk)
+        put('upload',id,session)
+        return {'offset':path.stat().st_size}
+
+@app.post('/api/upload-sessions/{id}/finish')
+async def finish_upload(id: str, token: str=Depends(owner)):
+    session=owned('upload',id,token)
+    with r.lock('finish:'+id,timeout=120,blocking_timeout=5):
+        session=owned('upload',id,token)
+        if session.get('asset'): return session['asset']
+        path=DATA/id/'partial'
+        if path.stat().st_size!=session['size']: raise HTTPException(409,'Upload is incomplete')
+        file=UploadFile(filename=session['filename'],file=path.open('rb'))
+        asset=await upload(file=file,kind=session['kind'],title=session['title'],artist=session['artist'],license=session['license'],source=session['source'],permission=session['permission'],token=token)
+        session['asset']=asset;put('upload',id,session)
+        path.write_bytes(b'')
+        return asset
 
 class Request(BaseModel):
     video_id: str
