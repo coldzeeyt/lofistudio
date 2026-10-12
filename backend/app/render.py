@@ -121,7 +121,19 @@ def _render(job):
     run(['-i',str(playlist),'-i',str(playlist),'-i',str(playlist),'-filter_complex',graph,'-map','[a]',str(music)],id,'Smoothing playlist loop',20,5,total-af)
     (directory/'channel.txt').write_text(job['channel'],encoding='utf-8')
     inputs=['-stream_loop','-1','-i',str(cycle),'-stream_loop','-1','-i',str(music)]
-    graph=['[1:a]asplit=3[music][visual][waveaudio]',f'[visual]showfreqs=s={w//2}x100:mode=bar:ascale=log:fscale=log:colors={job["color"]}:rate=24,format=rgba,pad=iw:ih+20:0:0:black[viz]',f'[waveaudio]showwaves=s={w//2}x60:mode=line:rate=24:colors={job["color"]}:scale=sqrt,format=rgba[wave]','[viz][wave]vstack=inputs=2,colorkey=black:0.08:0.1[visualizer]',f'[0:v][visualizer]overlay=(W-w)/2:H-h-45[base]']
+    # Analyze a mono average without altering the exported stereo music. Native
+    # RGBA alpha preserves dark custom colors; chroma-keying black erased them.
+    analysis='pan=mono|c0=0.5*c0+0.5*c1'
+    visual_color=job['color'].replace('#','0x')
+    graph=[
+        '[1:a]asplit=3[music][visual][waveaudio]',
+        f'[visual]{analysis},showfreqs=s={w//2}x100:mode=line:ascale=log:fscale=log:colors={visual_color}:rate=24:averaging=2,format=rgba,pad=iw:ih+20:0:0:color=black@0[viz]',
+        # 48 kHz / 24 fps = 2000 samples per frame, including fractional
+        # samples per horizontal pixel at both supported export widths.
+        f'[waveaudio]{analysis},showwaves=s={w//2}x60:mode=p2p:rate=24:n=2000/{w//2}:colors={visual_color}:scale=sqrt:draw=full,format=rgba[wave]',
+        '[viz][wave]vstack=inputs=2,dilation=coordinates=255[visualizer]',
+        f'[0:v][visualizer]overlay=(W-w)/2:H-h-45[base]',
+    ]
     if job['nature_volume']>0 and any(s['codec_type']=='audio' for s in source['streams']):
         inputs+=['-stream_loop','-1','-i',str(video)]
         graph += [f'[2:a]volume={job["nature_volume"]}[nature]','[music][nature]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[audio]']

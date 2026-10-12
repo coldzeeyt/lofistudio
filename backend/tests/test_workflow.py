@@ -222,3 +222,32 @@ def test_preparation_cache_eviction_keeps_active_media(tmp_path,monkeypatch):
     cache.prune(keep=[old])
     assert old.exists() and new.exists() and not middle.exists()
     assert sum(p.stat().st_size for p in tmp_path.iterdir())<=16
+
+@pytest.mark.parametrize('resolution,color',[('720p','#b7c9a8'),('1080p','#000000')])
+def test_visualizers_follow_audible_pulses_with_transparent_background(media,resolution,color):
+    import array
+    source=DATA/'visualizer-white.mp4';pulses=DATA/'visualizer-pulses.wav'
+    ff('-f','lavfi','-i','color=c=white:s=320x180:r=24:d=4','-c:v','libx264','-pix_fmt','yuv420p',source)
+    ff('-f','lavfi','-i',r"aevalsrc=if(between(t\,4\,5)+between(t\,7\,8)\,0.3*sin(2*PI*440*t)\,0):s=48000:d=12",pulses)
+    id='visualizer-pulses-'+resolution;(DATA/id).mkdir(exist_ok=True)
+    job={'id':id,'owner':'a'*64,'video_path':str(source),'tracks':[{'path':str(pulses),'title':'Pulses','artist':'Test','license':'Original'}],'seconds':9,'resolution':resolution,'channel':'Pulse check','color':color,'font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+    put('job',id,job);render(job)
+    output=DATA/id/'output.mp4';info=probe(output)
+    video=next(s for s in info['streams'] if s['codec_type']=='video')
+    assert video['r_frame_rate']=='24/1'
+    width,height=video['width'],video['height']
+    def dark_pixels(at,y,h):
+        raw=subprocess.check_output(['ffmpeg','-v','error','-threads','2','-ss',str(at),'-i',str(output),'-vf',f'crop={width//2}:{h}:{width//4}:{y}','-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
+        return sum(raw[i+1]<220 for i in range(0,len(raw),3))
+    for quiet,loud in ((3.25,4.25),(6.25,7.25)):
+        quiet_wave=dark_pixels(quiet,height-105,60)
+        loud_wave=dark_pixels(loud,height-105,60)
+        assert loud_wave>quiet_wave*2, 'Waveform must respond at the audible pulse timestamp'
+        # Exclude the flat silence baseline at the bottom of the spectrum.
+        assert dark_pixels(loud,height-225,80)>dark_pixels(quiet,height-225,80)*2+20
+        # No opaque black rectangle may cover the gap between visualizers.
+        assert dark_pixels(loud,height-120,10)<width//2
+        pcm=subprocess.check_output(['ffmpeg','-v','error','-i',str(output),'-ss',str(loud),'-t','0.1','-vn','-f','s16le','-ac','1','-ar','48000','-'])
+        assert max(abs(x) for x in array.array('h',pcm))>500
+    # The mono visualizer must not turn the exported audio into mono.
+    assert next(s for s in info['streams'] if s['codec_type']=='audio')['channels']==2
