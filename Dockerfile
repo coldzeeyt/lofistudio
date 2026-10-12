@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-de
 WORKDIR /app
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY backend/app ./backend/app
+COPY backend/prepare_library.py ./prepare_library.py
 COPY library ./library
+RUN python prepare_library.py
+COPY backend/app ./backend/app
 COPY --from=frontend /build/dist ./frontend/dist
 ENV DATA_DIR=/data PYTHONUNBUFFERED=1
 RUN mkdir /data

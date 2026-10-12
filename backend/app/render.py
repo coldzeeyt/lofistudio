@@ -1,8 +1,9 @@
 """Bounded-memory FFmpeg pipeline. The visualizer consumes the final music mix."""
-import json, subprocess, time, queue, threading, wave
+import json, subprocess, time, queue, threading, wave, os, re
 from pathlib import Path
 from .store import r, update
 from .config import DATA, MAX_UPLOAD
+from . import cache
 class Cancelled(Exception): pass
 
 def probe(path):
@@ -49,30 +50,60 @@ def run(args, job, stage, start, span, duration):
                 except subprocess.TimeoutExpired: p.kill(); p.wait()
 
 def render(job):
+    try: return _render(job)
+    finally: cache.prune()
+
+def _render(job):
     id = job['id']; directory = DATA/id; directory.mkdir(exist_ok=True)
     video = Path(job['video_path']); tracks = job['tracks']; seconds = job['seconds']
     w,h = (1280,720) if job['resolution']=='720p' else (1920,1080)
     source = probe(video); d = float(source['format']['duration']); fade = min(1.,d/4)
-    # Normalize once, then seek independent inputs. A split stream can buffer the
-    # entire clip while waiting for its tail, exhausting RAM on 4K phone footage.
-    prepared=directory/'prepared.mp4'
-    prep_rate=int(min(16_000_000 if h==1080 else 8_000_000,MAX_UPLOAD*8/d*0.85))
-    vf=f'fps=24,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=yuv420p'
-    run(['-i',str(video),'-map','0:v:0','-vf',vf,'-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(prepared)],id,'Preparing phone footage',0,5,d)
-    prepared_duration=float(probe(prepared)['format']['duration'])
-    if abs(prepared_duration-d)>0.2: raise RuntimeError('Video preparation was truncated. Please try a shorter clip.')
-    d=prepared_duration;fade=min(1.,d/4)
-    cycle=directory/'cycle.mp4';period=d-fade
-    graph=f"[0:v]setpts=PTS-STARTPTS[tail];[1:v]setpts=PTS-STARTPTS[head];[tail][head]blend=all_expr='A*(1-T/{fade})+B*T/{fade}'[seam];[2:v]setpts=PTS-STARTPTS[mid];[seam][mid]concat=n=2:v=1:a=0,eq=saturation=0.85:brightness=-0.025:contrast=1.02[v]"
-    inputs=['-ss',str(d-fade),'-t',str(fade),'-i',str(prepared),'-t',str(fade),'-i',str(prepared),'-ss',str(fade),'-t',str(d-2*fade),'-i',str(prepared)]
-    run(inputs+['-filter_complex',graph,'-map','[v]','-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(cycle)],id,'Preparing seamless nature loop',5,5,period)
-    if abs(float(probe(cycle)['format']['duration'])-period)>0.2: raise RuntimeError('The nature loop could not be completed. Please try a shorter clip.')
-    prepared.unlink(missing_ok=True)
+    cached_cycle=cache.location(video,f'loop24-grade-v2-{w}-{h}-{MAX_UPLOAD}').with_suffix('.mp4')
+    protected=[]
+    if cached_cycle.exists():
+        cycle=cached_cycle;cache.touch(cycle)
+        update(id,stage='Using prepared nature loop',progress=10)
+    else:
+        # Normalize once, then seek independent inputs. A split stream can buffer the
+        # entire clip while waiting for its tail, exhausting RAM on 4K phone footage.
+        prepared=directory/'prepared.mp4'
+        prep_rate=int(min(16_000_000 if h==1080 else 8_000_000,MAX_UPLOAD*8/d*0.85))
+        vf=f'fps=24,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=yuv420p'
+        run(['-i',str(video),'-map','0:v:0','-vf',vf,'-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(prepared)],id,'Preparing phone footage',0,5,d)
+        prepared_duration=float(probe(prepared)['format']['duration'])
+        if abs(prepared_duration-d)>0.2: raise RuntimeError('Video preparation was truncated. Please try a shorter clip.')
+        d=prepared_duration;fade=min(1.,d/4)
+        cycle=directory/'cycle.mp4';period=d-fade
+        graph=f"[0:v]setpts=PTS-STARTPTS[tail];[1:v]setpts=PTS-STARTPTS[head];[tail][head]blend=all_expr='A*(1-T/{fade})+B*T/{fade}'[seam];[2:v]setpts=PTS-STARTPTS[mid];[seam][mid]concat=n=2:v=1:a=0,eq=saturation=0.85:brightness=-0.025:contrast=1.02[v]"
+        inputs=['-ss',str(d-fade),'-t',str(fade),'-i',str(prepared),'-t',str(fade),'-i',str(prepared),'-ss',str(fade),'-t',str(d-2*fade),'-i',str(prepared)]
+        run(inputs+['-filter_complex',graph,'-map','[v]','-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(cycle)],id,'Preparing seamless nature loop',5,5,period)
+        if abs(float(probe(cycle)['format']['duration'])-period)>0.2: raise RuntimeError('The nature loop could not be completed. Please try a shorter clip.')
+        prepared.unlink(missing_ok=True)
+        cycle.replace(cached_cycle)
+        cycle=cached_cycle
+
+    protected.append(cycle)
     normalized=[]
+    library_root=Path(os.getenv('LIBRARY_DIR','library')).resolve()
     for i,t in enumerate(tracks):
-        out=directory/f'track-{i}.wav'; td=float(probe(t['path'])['format']['duration'])
-        run(['-i',t['path'],'-vn','-af','loudnorm=I=-18:TP=-2:LRA=11','-ar','48000','-ac','2',str(out)],id,'Balancing music',10+5*i/len(tracks),5/len(tracks),td)
-        normalized.append(out)
+        digest=t.get('sha256') or ''
+        prepared_music=library_root/'prepared'/f'balanced-v1-{digest}.flac'
+        if re.fullmatch('[0-9a-f]{64}',digest) and Path(t['path']).resolve().is_relative_to(library_root) and prepared_music.is_file():
+            normalized.append(prepared_music)
+            update(id,stage='Using ready library music',progress=10+5*(i+1)/len(tracks))
+            continue
+        out=cache.location(t['path'],'loudnorm-I18-TP2-LRA11-s16-48k-v1',t.get('sha256')).with_suffix('.flac')
+        if out.exists():
+            cache.touch(out)
+            update(id,stage='Using balanced music',progress=10+5*(i+1)/len(tracks))
+        else:
+            td=float(probe(t['path'])['format']['duration'])
+            temporary=out.with_name(out.stem+'.tmp.'+id+'.flac')
+            try:
+                run(['-i',t['path'],'-vn','-af','loudnorm=I=-18:TP=-2:LRA=11','-ar','48000','-ac','2','-c:a','flac','-compression_level','0','-sample_fmt','s16',str(temporary)],id,'Balancing music',10+5*i/len(tracks),5/len(tracks),td)
+                temporary.replace(out)
+            finally: temporary.unlink(missing_ok=True)
+        normalized.append(out);protected.append(out);cache.prune(protected)
     # Crossfade all selected tracks, then turn playlist into a seamless repeating cycle.
     inputs=[]; graph=[]; label='0:a'; total=float(probe(normalized[0])['format']['duration'])
     for path in normalized: inputs+=['-i',str(path)]
@@ -90,7 +121,7 @@ def render(job):
     run(['-i',str(playlist),'-i',str(playlist),'-i',str(playlist),'-filter_complex',graph,'-map','[a]',str(music)],id,'Smoothing playlist loop',20,5,total-af)
     (directory/'channel.txt').write_text(job['channel'],encoding='utf-8')
     inputs=['-stream_loop','-1','-i',str(cycle),'-stream_loop','-1','-i',str(music)]
-    graph=['[1:a]asplit=3[music][visual][waveaudio]',f'[visual]showfreqs=s={w//2}x100:mode=bar:ascale=log:fscale=log:colors={job["color"]}:rate=24,format=rgba,colorkey=black:0.08:0.1[viz]',f'[waveaudio]showwaves=s={w//2}x60:mode=line:rate=24:colors={job["color"]}:scale=sqrt,format=rgba,colorkey=black:0.08:0.1[wave]',f'[0:v][viz]overlay=(W-w)/2:H-h-125[spectrum]',f'[spectrum][wave]overlay=(W-w)/2:H-h-45[base]']
+    graph=['[1:a]asplit=3[music][visual][waveaudio]',f'[visual]showfreqs=s={w//2}x100:mode=bar:ascale=log:fscale=log:colors={job["color"]}:rate=24,format=rgba,pad=iw:ih+20:0:0:black[viz]',f'[waveaudio]showwaves=s={w//2}x60:mode=line:rate=24:colors={job["color"]}:scale=sqrt,format=rgba[wave]','[viz][wave]vstack=inputs=2,colorkey=black:0.08:0.1[visualizer]',f'[0:v][visualizer]overlay=(W-w)/2:H-h-45[base]']
     if job['nature_volume']>0 and any(s['codec_type']=='audio' for s in source['streams']):
         inputs+=['-stream_loop','-1','-i',str(video)]
         graph += [f'[2:a]volume={job["nature_volume"]}[nature]','[music][nature]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[audio]']

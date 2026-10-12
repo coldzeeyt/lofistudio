@@ -19,6 +19,7 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
 redis-server --daemonize yes
+python backend/prepare_library.py
 uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -38,10 +39,12 @@ The Vite proxy forwards `/api` to the backend. Production serves the compiled fr
 
 1. Browser uploads use 1 MiB chunks with automatic connection retries, byte progress, and a saved upload position. Selecting the same file after an interruption resumes that session. The server accepts repeated chunks idempotently and validates the completed media before creating an asset. Uploaded files are streamed to UUID directories with per-file size limits, parsed by FFprobe, and restricted to approved media demuxers and local protocols. Assets and jobs require a private random bearer token kept in browser local storage; source paths are never returned.
 2. FFmpeg first normalizes phone footage to the target dimensions and 24 fps using bounded decoder/encoder threads. It then seeks separate tail, head and middle inputs to avoid buffering the entire video. It builds one video cycle by dissolving its tail into its head and adjoining the middle. The cycle repeats with matching joins and gentle nature grading.
-3. Selected tracks are loudness-normalized, crossfaded into a playlist, then given a tail/head audio crossfade for repeated playback.
+3. The 30 bundled songs are loudness-normalized into lossless FLAC during the Docker build, so jobs skip their normalization entirely. Imported music is normalized on its first use. Selected tracks are crossfaded into a playlist, then given a tail/head audio crossfade for repeated playback.
 4. `showwaves` renders a scrolling waveform and `showfreqs` renders a frequency spectrum from the very same normalized music stream mapped into the output. Optional original nature audio is mixed separately; both visualizers react to music, not the ambient sound. Export metadata is stripped, including camera location tags. Channel text is read from a text file with expansion disabled; optional logos are overlaid.
 5. FFmpeg's output timestamps drive stage progress. Redis stores the queue, cancellation and status independently of the browser. The single background worker terminates FFmpeg on cancellation. Interrupted active jobs are marked failed after a server restart, and queued jobs resume. Completed files download through short-lived private links.
 6. Titles/descriptions are deterministic templates, with the actual selected track metadata included. No AI API calls.
+
+Prepared nature loops and imported music are cached privately by content hash and preparation settings, so re-uploading identical footage can reuse its loop. Branding, playlist transitions and the music-synchronized waveform/spectrum are rendered for each export. The visualizers share one overlay to reduce full-frame processing. The cache uses least-recently-used eviction with a default 256 MiB budget between jobs; active inputs remain protected until rendering finishes. Cached files count toward the media storage budget and retention cleanup. The encoder retains its existing `veryfast` preset and CRF 20 quality setting.
 
 The built-in library contains **30 lo-fi songs by HoliznaCC0**, published by the artist under CC0 1.0 on OpenGameArt. See [music provenance](library/LICENSES.md) and the per-track source URLs and hashes in `library/manifest.json`. Three tracks are selected automatically; users can shuffle, preview or choose up to ten tracks. The actual audio is bundled, so the renderer works without a music API or external download.
 
@@ -50,10 +53,10 @@ For additional imported music, users enter title, artist, license/permission and
 To expand the operator-reviewed built-in library, place audio files under `library/` and add entries to `library/manifest.json`:
 
 ```json
-[{"id":"unique-track-id","title":"Track title","artist":"Artist","license":"CC BY 4.0","source":"https://actual-license-and-source-page.example","file":"track.wav"}]
+[{"id":"unique-track-id","title":"Track title","artist":"Artist","license":"CC BY 4.0","source":"https://actual-license-and-source-page.example","file":"track.wav","sha256":"replace-with-the-exact-audio-file-sha256"}]
 ```
 
-Replace that example with genuine, reviewed license information and the actual file. For commercial/monetized use, check that the license permits the intended use. The interface automatically selects a licensed playlist and allows changes; imported tracks form a repeating playlist. Music transitions use up to 2-second crossfades and shorter transitions for very short tracks.
+Replace that example with genuine, reviewed license information, the actual file and its 64-character SHA-256 checksum. The preparation build checks that checksum before processing. For commercial/monetized use, check that the license permits the intended use. The interface automatically selects a licensed playlist and allows changes; imported tracks form a repeating playlist. Music transitions use up to 2-second crossfades and shorter transitions for very short tracks.
 
 ## Railway deployment
 
@@ -73,6 +76,7 @@ Set service variables:
 | `MAX_ACTIVE_JOBS` | `3`, global running + queued limit |
 | `MAX_RENDER_SECONDS` | `10800`; use `600` initially to reduce costs |
 | `RETENTION_HOURS` | `24` |
+| `PREPARATION_CACHE_MB` | `256`, reusable loop/imported-music cache budget |
 | `MAX_DAILY_RENDER_SECONDS` | `21600`, global six hours of requested video per UTC day |
 
 Railway injects `PORT`. The container runs exactly **one Uvicorn process and one service replica**. Do not enable horizontal scaling: this design keeps the queue consumer alongside the API on the same persistent volume, since Railway volumes cannot be shared between separate services. Redis is a separate service. A future multi-worker version should move media to object storage and use distributed leases.
@@ -90,6 +94,7 @@ Cloning/building the repo creates no live resources. To manage a Railway project
 With a local Redis running, execute:
 
 ```sh
+python backend/prepare_library.py
 python -m pytest backend/tests -q
 npm ci --prefix frontend
 npm run build --prefix frontend

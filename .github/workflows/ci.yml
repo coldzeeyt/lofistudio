@@ -19,5 +19,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
       - run: pip install -r backend/requirements.txt
+      - run: python backend/prepare_library.py
       - run: python -m pytest backend/tests -q
       - run: npm ci --prefix frontend && npm run build --prefix frontend

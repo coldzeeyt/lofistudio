@@ -192,3 +192,33 @@ def test_4k_hevc_phone_clip_with_location_metadata(media):
     assert abs(float(info['format']['duration'])-7)<.2
     assert not any('location' in k.lower() for k in info['format'].get('tags',{}))
     assert not (DATA/id/'prepared.mp4').exists()
+
+def test_preparation_cache_reuses_reuploaded_footage_without_reusing_brand(media,monkeypatch):
+    import shutil
+    from backend.app import render as renderer
+    copied=DATA/'reuploaded-nature.mp4';shutil.copyfile(media[0],copied)
+    jobs=[];calls=[];original=renderer.run
+    def tracked(*args,**kwargs):
+        calls.append(args[2]);return original(*args,**kwargs)
+    monkeypatch.setattr(renderer,'run',tracked)
+    for i,video in enumerate((media[0],copied)):
+        id='cache-reuse-'+str(i);(DATA/id).mkdir(exist_ok=True)
+        job={'id':id,'owner':'a'*64,'video_path':str(video),'tracks':[{'path':str(media[1]),'title':'Fixture','artist':'Test','license':'Original'}],'seconds':7,'resolution':'720p','channel':'FIRST' if i==0 else 'SECOND','color':'#b7c9a8','font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+        put('job',id,job);calls.clear();renderer.render(job);jobs.append(id)
+    assert not any(stage in calls for stage in ('Preparing phone footage','Preparing seamless nature loop','Balancing music'))
+    pixels=[]
+    for id in jobs:
+        output=DATA/id/'output.mp4'
+        pixels.append(subprocess.check_output(['ffmpeg','-v','error','-ss','0.5','-i',str(output),'-vf','crop=iw:150:0:0','-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-']))
+    assert pixels[0]!=pixels[1], 'Channel branding must stay specific to each export'
+
+def test_preparation_cache_eviction_keeps_active_media(tmp_path,monkeypatch):
+    import time
+    from backend.app import cache
+    monkeypatch.setattr(cache,'ROOT',tmp_path);monkeypatch.setattr(cache,'LIMIT',16)
+    old=tmp_path/'old.flac';middle=tmp_path/'middle.flac';new=tmp_path/'new.mp4'
+    for p in (old,middle,new):p.write_bytes(b'12345678')
+    now=time.time();os.utime(old,(now-20,now-20));os.utime(middle,(now-10,now-10))
+    cache.prune(keep=[old])
+    assert old.exists() and new.exists() and not middle.exists()
+    assert sum(p.stat().st_size for p in tmp_path.iterdir())<=16
