@@ -30,6 +30,8 @@ npm ci
 npm run dev
 ```
 
+The standard root Dockerfile is used by Railway. For a managed execution environment with a session proxy CA, `Dockerfile.cloud` accepts an optional BuildKit `proxy_ca` secret; mount the environment CA at build time rather than embedding it into the image.
+
 The Vite proxy forwards `/api` to the backend. Production serves the compiled frontend from FastAPI. PWA installation and the service worker require HTTPS or localhost. Android/desktop show an install button when the browser permits; iPhone uses Safari → Share → Add to Home Screen. Offline access displays the cached UI; uploading, rendering status and downloads require connectivity.
 
 ## Rendering and music
