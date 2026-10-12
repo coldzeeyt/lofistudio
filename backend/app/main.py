@@ -242,7 +242,11 @@ def generate(req: Request, token: str=Depends(owner)):
         put('job',id,job); r.rpush('queue',id)
     return public(job)
 
-def public(job): return {k:v for k,v in job.items() if k not in ('owner','video_path','tracks','logo_path')}
+def public(job):
+    result={k:v for k,v in job.items() if k not in ('owner','video_path','tracks','logo_path')}
+    if str(result.get('error','')).startswith('FFmpeg failed:'):
+        result['error']='The renderer could not process this video. Use Retry render to try the updated renderer.'
+    return result
 @app.get('/api/jobs/{id}')
 def status(id: str, token: str=Depends(owner)): return public(owned('job',id,token))
 @app.post('/api/jobs/{id}/cancel')
@@ -254,6 +258,28 @@ def cancel(id: str, token: str=Depends(owner)):
             r.lrem('queue',0,id)
             update(id,status='cancelled',stage='Cancelled')
     return {'status':'cancellation requested'}
+@app.post('/api/jobs/{id}/retry',status_code=202)
+def retry_render(id: str, token: str=Depends(owner)):
+    with r.lock('admission',timeout=10,blocking_timeout=5):
+        job=owned('job',id,token)
+        if job['status']!='failed' or job.get('progress',0)>=10: raise HTTPException(409,'Start a new render for this video')
+        if job.get('retry_count',0)>=2: raise HTTPException(429,'Retry limit reached. Start a new render or choose another clip.')
+        if not Path(job['video_path']).exists() or any(not Path(t['path']).exists() for t in job['tracks']): raise HTTPException(410,'Source files expired. Upload your video again.')
+        active=[json.loads(r.get(k) or '{}') for k in r.scan_iter('job:*')]
+        active=[j for j in active if j.get('status') in ('queued','rendering')]
+        if len(active)>=MAX_ACTIVE or any(j.get('owner')==token for j in active): raise HTTPException(429,'You already have an active render or the queue is full')
+        reserved=sum(j.get('storage_reservation',0) for j in active)
+        used=sum(p.stat().st_size for p in DATA.rglob('*') if p.is_file())
+        scratch=sum(t.get('duration',600)*576_000 for t in job['tracks'])+MAX_UPLOAD*2
+        available=min(MAX_STORAGE-used-reserved,shutil.disk_usage(DATA).free-reserved)
+        output_limit=int(min(job.get('output_limit',job.get('seconds',600)*1_000_000),available-scratch))
+        minimum=job.get('seconds',600)*(180_000 if job.get('resolution')=='1080p' else 120_000)
+        if output_limit<minimum: raise HTTPException(507,'Not enough storage. Try later.')
+        # Preparation never reached the long render. Retry the prepaid job up to twice.
+        update(id,status='queued',stage='Retrying video preparation',progress=0,error=None,retry_count=job.get('retry_count',0)+1,output_limit=output_limit,storage_reservation=output_limit+scratch)
+        r.delete('cancel:'+id);r.rpush('queue',id)
+        return public(get('job',id))
+
 @app.get('/api/jobs/{id}/download')
 def download(id: str, token: str=Depends(owner)):
     job=owned('job',id,token); path=DATA/id/'output.mp4'

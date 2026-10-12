@@ -2,7 +2,7 @@
 import json, subprocess, time, queue, threading, wave
 from pathlib import Path
 from .store import r, update
-from .config import DATA
+from .config import DATA, MAX_UPLOAD
 class Cancelled(Exception): pass
 
 def probe(path):
@@ -13,13 +13,14 @@ def probe(path):
 def run(args, job, stage, start, span, duration):
     safe_args=[]
     for arg in args:
-        if arg=='-i': safe_args += ['-protocol_whitelist','file,pipe','-format_whitelist','mov,matroska,webm,wav,mp3,ogg,flac,aac,png_pipe,jpeg_pipe,webp_pipe']
+        if arg=='-i': safe_args += ['-threads','2']; safe_args += ['-protocol_whitelist','file,pipe','-format_whitelist','mov,matroska,webm,wav,mp3,ogg,flac,aac,png_pipe,jpeg_pipe,webp_pipe']
         safe_args.append(arg)
     args=safe_args
+    if args[-1].endswith('.mp4'): args=args[:-1]+['-map_metadata','-1','-map_chapters','-1',args[-1]]
     update(job, stage=stage, progress=start)
     log = DATA / job / 'ffmpeg.log'
     with log.open('w') as errors:
-        p = subprocess.Popen(['ffmpeg','-hide_banner','-y','-nostdin','-filter_complex_threads','1','-threads','2',*args,'-progress','pipe:1','-nostats'], stdout=subprocess.PIPE, stderr=errors, text=True)
+        p = subprocess.Popen(['ffmpeg','-hide_banner','-y','-nostdin','-filter_threads','1','-filter_complex_threads','1','-threads','2',*args,'-progress','pipe:1','-nostats'], stdout=subprocess.PIPE, stderr=errors, text=True)
         deadline = time.monotonic() + max(300, duration*8)
         try:
             lines=queue.Queue()
@@ -37,7 +38,10 @@ def run(args, job, stage, start, span, duration):
                     try: seconds = int(line.split('=')[1])/1e6
                     except ValueError: continue
                     update(job, progress=min(start+span, start+span*seconds/max(duration, .1)))
-            if p.wait() != 0: raise RuntimeError('FFmpeg failed: '+log.read_text()[-1500:])
+            code=p.wait()
+            if code != 0:
+                message='The renderer ran out of processing resources. Please try again.' if code==-9 else 'The renderer could not process this media. Please try again or use another clip.'
+                raise RuntimeError(message)
         finally:
             if p.poll() is None:
                 p.terminate()
@@ -49,10 +53,21 @@ def render(job):
     video = Path(job['video_path']); tracks = job['tracks']; seconds = job['seconds']
     w,h = (1280,720) if job['resolution']=='720p' else (1920,1080)
     source = probe(video); d = float(source['format']['duration']); fade = min(1.,d/4)
-    # Tail/head dissolve followed by the middle: both joins match adjacent source frames.
-    cycle = directory/'cycle.mp4'; period = d-fade
-    vf = f"fps=24,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=yuv420p,split=3[a][b][c];[a]trim=start={d-fade}:end={d},setpts=PTS-STARTPTS[tail];[b]trim=end={fade},setpts=PTS-STARTPTS[head];[tail][head]blend=all_expr='A*(1-T/{fade})+B*T/{fade}'[seam];[c]trim=start={fade}:end={d-fade},setpts=PTS-STARTPTS[mid];[seam][mid]concat=n=2:v=1:a=0,eq=saturation=0.85:brightness=-0.025:contrast=1.02[v]"
-    run(['-i',str(video),'-filter_complex',vf,'-map','[v]','-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20',str(cycle)],id,'Preparing seamless nature loop',0,10,period)
+    # Normalize once, then seek independent inputs. A split stream can buffer the
+    # entire clip while waiting for its tail, exhausting RAM on 4K phone footage.
+    prepared=directory/'prepared.mp4'
+    prep_rate=int(min(16_000_000 if h==1080 else 8_000_000,MAX_UPLOAD*8/d*0.85))
+    vf=f'fps=24,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,format=yuv420p'
+    run(['-i',str(video),'-map','0:v:0','-vf',vf,'-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(prepared)],id,'Preparing phone footage',0,5,d)
+    prepared_duration=float(probe(prepared)['format']['duration'])
+    if abs(prepared_duration-d)>0.2: raise RuntimeError('Video preparation was truncated. Please try a shorter clip.')
+    d=prepared_duration;fade=min(1.,d/4)
+    cycle=directory/'cycle.mp4';period=d-fade
+    graph=f"[0:v]setpts=PTS-STARTPTS[tail];[1:v]setpts=PTS-STARTPTS[head];[tail][head]blend=all_expr='A*(1-T/{fade})+B*T/{fade}'[seam];[2:v]setpts=PTS-STARTPTS[mid];[seam][mid]concat=n=2:v=1:a=0,eq=saturation=0.85:brightness=-0.025:contrast=1.02[v]"
+    inputs=['-ss',str(d-fade),'-t',str(fade),'-i',str(prepared),'-t',str(fade),'-i',str(prepared),'-ss',str(fade),'-t',str(d-2*fade),'-i',str(prepared)]
+    run(inputs+['-filter_complex',graph,'-map','[v]','-an','-c:v','libx264','-threads:v','2','-preset','veryfast','-crf','20','-maxrate',str(prep_rate),'-bufsize',str(prep_rate*2),'-fs',str(MAX_UPLOAD),str(cycle)],id,'Preparing seamless nature loop',5,5,period)
+    if abs(float(probe(cycle)['format']['duration'])-period)>0.2: raise RuntimeError('The nature loop could not be completed. Please try a shorter clip.')
+    prepared.unlink(missing_ok=True)
     normalized=[]
     for i,t in enumerate(tracks):
         out=directory/f'track-{i}.wav'; td=float(probe(t['path'])['format']['duration'])

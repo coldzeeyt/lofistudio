@@ -37,9 +37,9 @@ The Vite proxy forwards `/api` to the backend. Production serves the compiled fr
 ## Rendering and music
 
 1. Browser uploads use 1 MiB chunks with automatic connection retries, byte progress, and a saved upload position. Selecting the same file after an interruption resumes that session. The server accepts repeated chunks idempotently and validates the completed media before creating an asset. Uploaded files are streamed to UUID directories with per-file size limits, parsed by FFprobe, and restricted to approved media demuxers and local protocols. Assets and jobs require a private random bearer token kept in browser local storage; source paths are never returned.
-2. FFmpeg builds one video cycle by dissolving its tail into its head and adjoining the middle. The cycle repeats with matching joins and gentle nature grading.
+2. FFmpeg first normalizes phone footage to the target dimensions and 24 fps using bounded decoder/encoder threads. It then seeks separate tail, head and middle inputs to avoid buffering the entire video. It builds one video cycle by dissolving its tail into its head and adjoining the middle. The cycle repeats with matching joins and gentle nature grading.
 3. Selected tracks are loudness-normalized, crossfaded into a playlist, then given a tail/head audio crossfade for repeated playback.
-4. `showwaves` renders a scrolling waveform and `showfreqs` renders a frequency spectrum from the very same normalized music stream mapped into the output. Optional original nature audio is mixed separately; both visualizers react to music, not the ambient sound. Channel text is read from a text file with expansion disabled; optional logos are overlaid.
+4. `showwaves` renders a scrolling waveform and `showfreqs` renders a frequency spectrum from the very same normalized music stream mapped into the output. Optional original nature audio is mixed separately; both visualizers react to music, not the ambient sound. Export metadata is stripped, including camera location tags. Channel text is read from a text file with expansion disabled; optional logos are overlaid.
 5. FFmpeg's output timestamps drive stage progress. Redis stores the queue, cancellation and status independently of the browser. The single background worker terminates FFmpeg on cancellation. Interrupted active jobs are marked failed after a server restart, and queued jobs resume. Completed files download through short-lived private links.
 6. Titles/descriptions are deterministic templates, with the actual selected track metadata included. No AI API calls.
 
@@ -98,3 +98,5 @@ npm run build --prefix frontend
 Tests use Redis **database 15**, flush that database, and generate synthetic media in `/tmp/lofi-integration`. Use a disposable local Redis, never production. They exercise actual uploads and validation, ownership, queue admission, cancellation, FFmpeg rendering at 720p/1080p, two-track crossfades, original audio mixing, safe channel text, logo overlay, export dimensions/duration/codecs, and complete MP4 decoding. Short test durations are renderer-only; the public API restricts durations to the four supported long-form choices.
 
 See `VALIDATION.md` for the checks actually run in the build environment and their limits.
+
+If a render fails during initial preparation, use **Retry render** to reuse its uploaded source. Two retries are allowed for the same prepaid job; they do not charge the global requested-video budget again. Expired source files must be uploaded again.

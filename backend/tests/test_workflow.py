@@ -167,3 +167,28 @@ def test_chunked_upload_retry_and_finish(media):
     assert client.post('/api/upload-sessions/'+id+'/finish',headers=headers).json()['id']==asset['id']
     assert Path(get('asset',asset['id'])['path']).read_bytes()==data
     assert client.get('/api/upload-sessions/'+id,headers=headers).json()['offset']==len(data)
+
+def test_preparation_retry_is_private_bounded_and_prepaid(media):
+    client=TestClient(app);owner='7'*64;headers={'Authorization':'Bearer '+owner}
+    job={'id':'retry-fixture','owner':owner,'video_path':str(media[0]),'tracks':[{'path':str(media[1])}],'status':'failed','progress':0,'error':'FFmpeg failed: sensitive metadata','storage_reservation':0}
+    put('job',job['id'],job)
+    assert 'sensitive metadata' not in client.get('/api/jobs/'+job['id'],headers=headers).text
+    assert client.post('/api/jobs/'+job['id']+'/retry',headers={'Authorization':'Bearer '+'8'*64}).status_code==404
+    response=client.post('/api/jobs/'+job['id']+'/retry',headers=headers)
+    assert response.status_code==202,response.text
+    assert response.json()['retry_count']==1
+    assert client.post('/api/jobs/'+job['id']+'/retry',headers=headers).status_code==409
+    job=get('job',job['id']);job.update(status='failed',retry_count=2);put('job',job['id'],job)
+    assert client.post('/api/jobs/'+job['id']+'/retry',headers=headers).status_code==429
+
+def test_4k_hevc_phone_clip_with_location_metadata(media):
+    source=DATA/'phone-4k.mp4'
+    ff('-f','lavfi','-i','color=c=0x426b48:s=3840x2160:r=30:d=31.44','-c:v','libx265','-preset','ultrafast','-x265-params','pools=2:frame-threads=2:log-level=error','-tag:v','hvc1','-color_range','pc','-metadata','location=+00.0000+00.0000/',source)
+    id='phone-hevc-export';(DATA/id).mkdir(exist_ok=True)
+    job={'id':id,'owner':'a'*64,'video_path':str(source),'tracks':[{'path':str(media[1]),'title':'Fixture','artist':'Test','license':'Original'}],'seconds':7,'resolution':'1080p','channel':'Phone clip','color':'#b7c9a8','font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+    put('job',id,job);render(job)
+    info=probe(DATA/id/'output.mp4')
+    assert info['streams'][0]['width']==1920
+    assert abs(float(info['format']['duration'])-7)<.2
+    assert not any('location' in k.lower() for k in info['format'].get('tags',{}))
+    assert not (DATA/id/'prepared.mp4').exists()
