@@ -1,0 +1,21 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    volumes: [redis-data:/data]
+  studio:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+      MAX_ACTIVE_JOBS: 3
+      MAX_RENDER_SECONDS: 10800
+      MAX_DAILY_RENDER_SECONDS: 21600
+      MAX_STORAGE_GB: 40
+      RETENTION_HOURS: 24
+    volumes: [studio-data:/data]
+    depends_on: [redis]
+volumes:
+  redis-data:
+  studio-data:
