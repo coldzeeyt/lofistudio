@@ -131,7 +131,7 @@ def _render(job):
         # 48 kHz / 24 fps = 2000 samples per frame, including fractional
         # samples per horizontal pixel at both supported export widths.
         f'[waveaudio]{analysis},showwaves=s={w//2}x60:mode=p2p:rate=24:n=2000/{w//2}:colors={visual_color}:scale=sqrt:draw=full,format=rgba[wave]',
-        '[viz][wave]vstack=inputs=2,dilation=coordinates=255[visualizer]',
+        '[viz][wave]vstack=inputs=2,format=gbrap,dilation=coordinates=255,format=rgba[visualizer]',
         f'[0:v][visualizer]overlay=(W-w)/2:H-h-45[base]',
     ]
     if job['nature_volume']>0 and any(s['codec_type']=='audio' for s in source['streams']):

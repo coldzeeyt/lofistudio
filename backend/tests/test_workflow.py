@@ -251,3 +251,7 @@ def test_visualizers_follow_audible_pulses_with_transparent_background(media,res
         assert max(abs(x) for x in array.array('h',pcm))>500
     # The mono visualizer must not turn the exported audio into mono.
     assert next(s for s in info['streams'] if s['codec_type']=='audio')['channels']==2
+    if color=='#b7c9a8':
+        raw=subprocess.check_output(['ffmpeg','-v','error','-ss','4.25','-i',str(output),'-vf',f'crop={width//2}:60:{width//4}:{height-105}','-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
+        sage=sum(raw[i+1]>raw[i]+7 and raw[i+1]>raw[i+2]+12 for i in range(0,len(raw),3))
+        assert sage>width//4, 'Line thickening must preserve the selected sage hue'
