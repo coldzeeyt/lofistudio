@@ -13,6 +13,6 @@ The generated domain is configured in Railway, not hard-coded into the PWA. The 
 
 See README.md for local use, configuration variables, redeploy instructions and public access limitations. See VALIDATION.md for tests and actual verification limits.
 
-Verified live: 2026-10-12, deployment `3bbcc6ec-6014-4883-9d65-4f1f7ec20341`, source commit `0e1f8a1`. Railway prepared all 30 licensed songs during the build. HTTPS health, UI/library/PWA checks and a full 10-minute render/download/decode passed. The waveform/spectrum correction includes native transparency, explicit channel analysis and color preservation. Its color check passed with production FFmpeg 5.1.9 under 2 CPU / 2 GB limits. App and Redis are online. See VALIDATION.md.
+Verified live: 2026-10-13, deployment `90fc2f62-701e-4f21-ba9c-eb141a6665bf`, source commit `d9c79e0`. Channel overlays are opt-in and visualizer style is selectable. All 21 integration tests and the frontend build passed in GitHub CI. A real blank-channel 10-minute frequency-dots export downloaded and fully decoded; pixel checks confirmed no unwanted name or old bottom waveform. The mobile UI controls and HTTPS health passed. App and Redis are online. See VALIDATION.md.
 
 Automatic app redeploys watch `backend/`, `frontend/`, `library/` and the root Dockerfile. Documentation-only updates do not restart the renderer.
