@@ -121,26 +121,30 @@ def _render(job):
     run(['-i',str(playlist),'-i',str(playlist),'-i',str(playlist),'-filter_complex',graph,'-map','[a]',str(music)],id,'Smoothing playlist loop',20,5,total-af)
     (directory/'channel.txt').write_text(job['channel'],encoding='utf-8')
     inputs=['-stream_loop','-1','-i',str(cycle),'-stream_loop','-1','-i',str(music)]
-    # Analyze a mono average without altering the exported stereo music. Native
-    # RGBA alpha preserves dark custom colors; chroma-keying black erased them.
-    analysis='pan=mono|c0=0.5*c0+0.5*c1'
-    visual_color=job['color'].replace('#','0x')
-    graph=[
-        '[1:a]asplit=3[music][visual][waveaudio]',
-        f'[visual]{analysis},showfreqs=s={w//2}x100:mode=line:ascale=log:fscale=log:colors={visual_color}:rate=24:averaging=2,format=rgba,pad=iw:ih+20:0:0:color=black@0[viz]',
-        # 48 kHz / 24 fps = 2000 samples per frame, including fractional
-        # samples per horizontal pixel at both supported export widths.
-        f'[waveaudio]{analysis},showwaves=s={w//2}x60:mode=p2p:rate=24:n=2000/{w//2}:colors={visual_color}:scale=sqrt:draw=full,format=rgba[wave]',
-        '[viz][wave]vstack=inputs=2,format=gbrap,dilation=coordinates=255,format=rgba[visualizer]',
-        f'[0:v][visualizer]overlay=(W-w)/2:H-h-45[base]',
-    ]
+    style=job.get('visualizer','spectrum')
+    graph=['[1:a]asplit=2[music][visual]'] if style!='none' else ['[1:a]anull[music]']
+    if style!='none':
+        # A single selected visualizer; the old second bottom trace is removed.
+        # Analyze averaged channels without changing the exported stereo music.
+        analysis='pan=mono|c0=0.5*c0+0.5*c1'
+        visual_color=job['color'].replace('#','0x')
+        if style=='waveform':
+            effect=f'showwaves=s={w//2}x100:mode=p2p:rate=24:n=2000/{w//2}:colors={visual_color}:scale=sqrt:draw=full'
+        else:
+            mode={'spectrum':'line','bars':'bar','dots':'dot'}[style]
+            effect=f'showfreqs=s={w//2}x100:mode={mode}:ascale=log:fscale=log:colors={visual_color}:rate=24:averaging=2'
+        graph += [f'[visual]{analysis},{effect},format=gbrap,dilation=coordinates=255,format=rgba[visualizer]',f'[0:v][visualizer]overlay=(W-w)/2:H-h-125[base]']
+    else:
+        graph += ['[0:v]null[base]']
     if job['nature_volume']>0 and any(s['codec_type']=='audio' for s in source['streams']):
         inputs+=['-stream_loop','-1','-i',str(video)]
         graph += [f'[2:a]volume={job["nature_volume"]}[nature]','[music][nature]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[audio]']
     else: graph+=['[music]anull[audio]']
     font={'sans':'DejaVuSans.ttf','serif':'DejaVuSerif.ttf','mono':'DejaVuSansMono.ttf'}[job['font']]
     x={'left':'50','center':'(w-text_w)/2','right':'w-text_w-50'}[job['position']]
-    graph += [f"[base]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/{font}:textfile={directory}/channel.txt:expansion=none:fontcolor={job['color']}:fontsize={h//22}:x={x}:y=50:shadowcolor=black@0.6:shadowx=2:shadowy=2[branded]"]
+    if job.get('show_channel',False) and job.get('channel','').strip():
+        graph += [f"[base]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/{font}:textfile={directory}/channel.txt:expansion=none:fontcolor={job['color']}:fontsize={h//22}:x={x}:y=50:shadowcolor=black@0.6:shadowx=2:shadowy=2[branded]"]
+    else: graph += ['[base]null[branded]']
     if job.get('logo_path'):
         inputs+=['-loop','1','-i',job['logo_path']]
         # Input index determined by actual optional nature source.

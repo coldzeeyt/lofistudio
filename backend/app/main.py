@@ -6,6 +6,7 @@ from fastapi import Request as HttpRequest
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from typing import Literal
 from .config import DATA, MAX_UPLOAD, MAX_STORAGE, TTL, MAX_ACTIVE, MAX_SECONDS, DAILY_SECONDS
 from .store import r, get, put, update
 from .render import probe, render, Cancelled
@@ -192,7 +193,9 @@ class Request(BaseModel):
     music_ids: list[str]=Field(default_factory=list,max_length=10)
     library_ids: list[str]=Field(default_factory=list,max_length=10)
     logo_id: str | None=None
-    channel: str=Field(min_length=1,max_length=80)
+    channel: str=Field(default='',max_length=80)
+    show_channel: bool=False
+    visualizer: Literal['spectrum','bars','dots','waveform','none']='spectrum'
     seconds: int=600
     resolution: str='720p'
     color: str='#b7c9a8'
@@ -205,6 +208,8 @@ def generate(req: Request, token: str=Depends(owner)):
     if req.seconds not in (600,1800,3600,10800) or req.seconds>MAX_SECONDS: raise HTTPException(400,'Duration is unavailable')
     if req.resolution not in ('720p','1080p') or req.font not in ('sans','serif','mono') or req.position not in ('left','center','right') or not re.fullmatch(r'#[0-9a-fA-F]{6}',req.color): raise HTTPException(400,'Invalid output settings')
     if any(ord(c)<32 for c in req.channel): raise HTTPException(400,'Channel name contains control characters')
+    req.channel=req.channel.strip()
+    if req.show_channel and not req.channel: raise HTTPException(400,'Enter a channel name or turn off the channel overlay')
     video=owned('asset',req.video_id,token)
     if video['kind']!='video': raise HTTPException(400,'Select a video')
     tracks=[owned('asset',id,token) for id in req.music_ids]
@@ -236,8 +241,9 @@ def generate(req: Request, token: str=Depends(owner)):
         r.incrby(day,req.seconds);r.expire(day,172800)
         id=secrets.token_hex(16)
         credits='\n'.join(f"• {t['title']} — {t['artist']} | {t['license']} | {t.get('source','')}" for t in tracks)
-        title=f"{req.channel} • {req.seconds//60} minutes of nature & lo-fi beats"
-        description=f"Relax, study and unwind with {req.channel}.\n\nMusic credits (playlist repeats):\n{credits}\n\nVisuals supplied by the channel."
+        channel_label=req.channel or 'Nature Sessions'
+        title=f"{channel_label} • {req.seconds//60} minutes of nature & lo-fi beats"
+        description=f"Relax, study and unwind with {channel_label}.\n\nMusic credits (playlist repeats):\n{credits}\n\nVisuals supplied by the channel."
         job={**req.model_dump(),'id':id,'owner':token,'video_path':video['path'],'tracks':tracks,'logo_path':logo['path'] if logo else None,'output_limit':output_limit,'storage_reservation':estimate,'status':'queued','stage':'Waiting for renderer','progress':0,'created_at':time.time(),'youtube':{'title':title,'description':description}}
         put('job',id,job); r.rpush('queue',id)
     return public(job)

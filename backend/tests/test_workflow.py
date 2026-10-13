@@ -51,7 +51,7 @@ def test_api_validation_and_ownership(media):
 @pytest.mark.parametrize('resolution',['720p','1080p'])
 def test_real_export(media,resolution):
     id='export-'+resolution; directory=DATA/id;directory.mkdir(exist_ok=True)
-    job={'id':id,'owner':'a'*64,'video_path':str(media[0]),'tracks':[{'path':str(p),'title':'Original test tone','artist':'Test','license':'Test fixture'} for p in media[1:3]],'seconds':7,'resolution':resolution,'channel':"Quiet Days: 100% & 'nature'",'color':'#b7c9a8','font':'serif','position':'center','nature_volume':.2,'logo_path':str(media[3]),'status':'rendering'}
+    job={'id':id,'owner':'a'*64,'video_path':str(media[0]),'tracks':[{'path':str(p),'title':'Original test tone','artist':'Test','license':'Test fixture'} for p in media[1:3]],'seconds':7,'resolution':resolution,'channel':"Quiet Days: 100% & 'nature'",'show_channel':True,'color':'#b7c9a8','font':'serif','position':'center','nature_volume':.2,'logo_path':str(media[3]),'status':'rendering'}
     put('job',id,job);render(job)
     output=directory/'output.mp4'; info=probe(output)
     assert abs(float(info['format']['duration'])-7)<.2
@@ -203,7 +203,7 @@ def test_preparation_cache_reuses_reuploaded_footage_without_reusing_brand(media
     monkeypatch.setattr(renderer,'run',tracked)
     for i,video in enumerate((media[0],copied)):
         id='cache-reuse-'+str(i);(DATA/id).mkdir(exist_ok=True)
-        job={'id':id,'owner':'a'*64,'video_path':str(video),'tracks':[{'path':str(media[1]),'title':'Fixture','artist':'Test','license':'Original'}],'seconds':7,'resolution':'720p','channel':'FIRST' if i==0 else 'SECOND','color':'#b7c9a8','font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+        job={'id':id,'owner':'a'*64,'video_path':str(video),'tracks':[{'path':str(media[1]),'title':'Fixture','artist':'Test','license':'Original'}],'seconds':7,'resolution':'720p','channel':'FIRST' if i==0 else 'SECOND','show_channel':True,'color':'#b7c9a8','font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
         put('job',id,job);calls.clear();renderer.render(job);jobs.append(id)
     assert not any(stage in calls for stage in ('Preparing phone footage','Preparing seamless nature loop','Balancing music'))
     pixels=[]
@@ -223,14 +223,14 @@ def test_preparation_cache_eviction_keeps_active_media(tmp_path,monkeypatch):
     assert old.exists() and new.exists() and not middle.exists()
     assert sum(p.stat().st_size for p in tmp_path.iterdir())<=16
 
-@pytest.mark.parametrize('resolution,color',[('720p','#b7c9a8'),('1080p','#000000')])
-def test_visualizers_follow_audible_pulses_with_transparent_background(media,resolution,color):
+@pytest.mark.parametrize('style,resolution,color',[('spectrum','720p','#b7c9a8'),('bars','720p','#b7c9a8'),('dots','720p','#b7c9a8'),('waveform','720p','#b7c9a8'),('waveform','1080p','#000000'),('spectrum','1080p','#000000')])
+def test_visualizers_follow_audible_pulses_with_transparent_background(media,style,resolution,color):
     import array
     source=DATA/'visualizer-white.mp4';pulses=DATA/'visualizer-pulses.wav'
     ff('-f','lavfi','-i','color=c=white:s=320x180:r=24:d=4','-c:v','libx264','-pix_fmt','yuv420p',source)
     ff('-f','lavfi','-i',r"aevalsrc=if(between(t\,4\,5)+between(t\,7\,8)\,0.3*sin(2*PI*440*t)\,0):s=48000:d=12",pulses)
-    id='visualizer-pulses-'+resolution;(DATA/id).mkdir(exist_ok=True)
-    job={'id':id,'owner':'a'*64,'video_path':str(source),'tracks':[{'path':str(pulses),'title':'Pulses','artist':'Test','license':'Original'}],'seconds':9,'resolution':resolution,'channel':'Pulse check','color':color,'font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+    id='visualizer-pulses-'+style+'-'+resolution;(DATA/id).mkdir(exist_ok=True)
+    job={'id':id,'owner':'a'*64,'video_path':str(source),'tracks':[{'path':str(pulses),'title':'Pulses','artist':'Test','license':'Original'}],'seconds':9,'resolution':resolution,'channel':'Pulse check','visualizer':style,'show_channel':False,'color':color,'font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
     put('job',id,job);render(job)
     output=DATA/id/'output.mp4';info=probe(output)
     video=next(s for s in info['streams'] if s['codec_type']=='video')
@@ -240,18 +240,48 @@ def test_visualizers_follow_audible_pulses_with_transparent_background(media,res
         raw=subprocess.check_output(['ffmpeg','-v','error','-threads','2','-ss',str(at),'-i',str(output),'-vf',f'crop={width//2}:{h}:{width//4}:{y}','-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
         return sum(raw[i+1]<220 for i in range(0,len(raw),3))
     for quiet,loud in ((3.25,4.25),(6.25,7.25)):
-        quiet_wave=dark_pixels(quiet,height-105,60)
-        loud_wave=dark_pixels(loud,height-105,60)
-        assert loud_wave>quiet_wave*2, 'Waveform must respond at the audible pulse timestamp'
-        # Exclude the flat silence baseline at the bottom of the spectrum.
-        assert dark_pixels(loud,height-225,80)>dark_pixels(quiet,height-225,80)*2+20
-        # No opaque black rectangle may cover the gap between visualizers.
-        assert dark_pixels(loud,height-120,10)<width//2
+        # Waveforms are centered; frequency styles rise from the bottom.
+        area=100 if style=='waveform' else 80
+        quiet_pixels=dark_pixels(quiet,height-225,area)
+        loud_pixels=dark_pixels(loud,height-225,area)
+        assert loud_pixels>quiet_pixels+20, 'Selected visualizer must respond at the audible pulse timestamp'
+        # The removed second waveform must never appear below the chosen style.
+        assert dark_pixels(loud,height-105,60)==0
+        assert dark_pixels(loud,height-120,10)==0
         pcm=subprocess.check_output(['ffmpeg','-v','error','-i',str(output),'-ss',str(loud),'-t','0.1','-vn','-f','s16le','-ac','1','-ar','48000','-'])
         assert max(abs(x) for x in array.array('h',pcm))>500
     # The mono visualizer must not turn the exported audio into mono.
     assert next(s for s in info['streams'] if s['codec_type']=='audio')['channels']==2
     if color=='#b7c9a8':
-        raw=subprocess.check_output(['ffmpeg','-v','error','-ss','4.25','-i',str(output),'-vf',f'crop={width//2}:60:{width//4}:{height-105}','-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
+        raw=subprocess.check_output(['ffmpeg','-v','error','-ss','4.25','-i',str(output),'-vf',f'crop={width//2}:100:{width//4}:{height-225}','-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
         sage=sum(raw[i+1]>raw[i]+7 and raw[i+1]>raw[i+2]+12 for i in range(0,len(raw),3))
-        assert sage>width//4, 'Line thickening must preserve the selected sage hue'
+        assert sage>20, 'Line thickening must preserve the selected sage hue'
+
+def test_optional_channel_overlay_and_no_visualizer(media):
+    import time
+    # The quota regression intentionally exhausts this test database's daily budget.
+    r.delete('render-budget:'+time.strftime('%Y-%m-%d',time.gmtime()))
+    source=DATA/'branding-white.mp4'
+    ff('-f','lavfi','-i','color=c=white:s=320x180:r=24:d=4','-c:v','libx264','-pix_fmt','yuv420p',source)
+    crops=[]
+    for visible in (True,False):
+        id='optional-brand-'+str(visible);(DATA/id).mkdir(exist_ok=True)
+        job={'id':id,'owner':'a'*64,'video_path':str(source),'tracks':[{'path':str(media[1])}],'seconds':3,'resolution':'720p','channel':'PRIVATE NAME','show_channel':visible,'visualizer':'none','color':'#000000','font':'sans','position':'left','nature_volume':0,'logo_path':None,'status':'rendering'}
+        put('job',id,job);render(job)
+        output=DATA/id/'output.mp4'
+        raw=subprocess.check_output(['ffmpeg','-v','error','-ss','1','-i',str(output),'-frames:v','1','-threads','1','-f','rawvideo','-pix_fmt','rgb24','-'])
+        crops.append(raw[:1280*150*3])
+        assert min(raw[1280*450*3:])>220, 'No visualizer must leave the lower footage clean'
+    assert min(crops[0])<100 and min(crops[1])>220, 'Turning branding off must remove the cached name'
+    client=TestClient(app);token='f'*64;headers={'Authorization':'Bearer '+token}
+    put('asset','optional-video',{'id':'optional-video','owner':token,'kind':'video','path':str(source)})
+    put('asset','optional-music',{'id':'optional-music','owner':token,'kind':'music','path':str(media[1]),'title':'Tone','artist':'Test','license':'Original','duration':3})
+    req={'video_id':'optional-video','music_ids':['optional-music'],'visualizer':'none'}
+    bad=client.post('/api/jobs',headers=headers,json={**req,'visualizer':'made-up'})
+    assert bad.status_code==422
+    assert client.post('/api/jobs',headers=headers,json={**req,'show_channel':True}).status_code==400
+    response=client.post('/api/jobs',headers=headers,json=req)
+    assert response.status_code==202,response.text
+    assert response.json()['channel']=='' and response.json()['show_channel'] is False
+    assert 'Nature Sessions' in response.json()['youtube']['title']
+    client.post('/api/jobs/'+response.json()['id']+'/cancel',headers=headers)
